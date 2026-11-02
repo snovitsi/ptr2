@@ -70,44 +70,98 @@ if [[ ! -f .env && -f .env.example ]]; then
   info "Копирую .env.example -> .env (localhost без Docker)"
   cp .env.example .env
 fi
+# читаем DATABASE_URL / REDIS_URL из .env (если есть) — проверки ниже должны
+# смотреть туда же, куда смотрит приложение, а не жёстко на 127.0.0.1
+[[ -f .env ]] && set +u && source .env 2>/dev/null || true; set -u 2>/dev/null || true
+DATABASE_URL=${DATABASE_URL:-postgresql+psycopg://ptr2:ptr2@localhost:5432/ptr2}
+REDIS_URL=${REDIS_URL:-redis://localhost:6379/0}
+
+# Парсим host/port из URL вида scheme://[user:pass@]host:port/db
+parse_hostport() { # $1=url $2=порт_по_умолчанию -> глобалы PH_HOST PH_PORT
+  local rest=${1#*://}
+  rest=${rest#*@}                 # отбрасываем user:pass@
+  PH_HOST=${rest%%/*}             # host:port (до первого /)
+  PH_HOST=${PH_HOST%%\?*}         # на случай query-параметров
+  if [[ "$PH_HOST" == *:* ]]; then
+    PH_PORT=${PH_HOST##*:}; PH_HOST=${PH_HOST%:*}
+  else
+    PH_PORT=$2
+  fi
+  [[ "$PH_HOST" == "" ]] && PH_HOST=localhost
+}
 
 # --- 4. запуск сервисов --------------------------------------------------------
+# Локальный сервис поднимаем через service/systemctl только если хост БД — локальный.
+FORCE_LOCAL_SERVICES=${FORCE_LOCAL_SERVICES:-false}
+PG_IS_LOCAL=false; REDIS_IS_LOCAL=false
+
 start_services() {
   # PostgreSQL
-  if ! pg_isready -h 127.0.0.1 -q 2>/dev/null; then
-    info "Запускаю PostgreSQL"
-    if command -v service >/dev/null 2>&1; then
-      sudo service postgresql start || true
-    elif command -v systemctl >/dev/null 2>&1; then
-      sudo systemctl start postgresql || true
+  parse_hostport "$DATABASE_URL" 5432
+  PG_HOST=$PH_HOST; PG_PORT=$PH_PORT
+  case "$PG_HOST" in localhost|127.0.0.1|::1|localhost.localdomain) PG_IS_LOCAL=true ;; esac
+  $FORCE_LOCAL_SERVICES && PG_IS_LOCAL=true
+  if ! pg_isready -h "$PG_HOST" -p "$PG_PORT" -q 2>/dev/null; then
+    if $PG_IS_LOCAL; then
+      info "Запускаю PostgreSQL ($PG_HOST:$PG_PORT)"
+      if command -v service >/dev/null 2>&1; then
+        sudo service postgresql start || true
+      elif command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl start postgresql || true
+      fi
+      for _ in $(seq 1 30); do pg_isready -h "$PG_HOST" -p "$PG_PORT" -q && break; sleep 1; done
+    else
+      warn "PostgreSQL на '$PG_HOST' недоступен с этого хоста — проверьте сеть/брандмауэр/pg_hba.conf."
     fi
-    for _ in $(seq 1 30); do pg_isready -h 127.0.0.1 -q && break; sleep 1; done
   fi
-  pg_isready -h 127.0.0.1 -q || { warn "PostgreSQL недоступен — поднимите его вручную."; exit 1; }
+  pg_isready -h "$PG_HOST" -p "$PG_PORT" -q || { warn "PostgreSQL недоступен ($PG_HOST:$PG_PORT) — поднимите его вручную."; exit 1; }
 
   # Redis
-  if ! redis-cli -h 127.0.0.1 ping >/dev/null 2>&1; then
-    info "Запускаю Redis"
-    if command -v service >/dev/null 2>&1; then
-      sudo service redis-server start || true
-    elif command -v systemctl >/dev/null 2>&1; then
-      sudo systemctl start redis-server || true
+  parse_hostport "$REDIS_URL" 6379
+  RD_HOST=$PH_HOST; RD_PORT=$PH_PORT
+  case "$RD_HOST" in localhost|127.0.0.1|::1|localhost.localdomain) REDIS_IS_LOCAL=true ;; esac
+  if ! timeout 5 redis-cli -h "$RD_HOST" -p "$RD_PORT" ping 2>/dev/null | grep -q PONG; then
+    if $REDIS_IS_LOCAL; then
+      info "Запускаю Redis ($RD_HOST:$RD_PORT)"
+      if command -v service >/dev/null 2>&1; then
+        sudo service redis-server start || true
+      elif command -v systemctl >/dev/null 2>&1; then
+        sudo systemctl start redis-server || true
+      fi
+      sleep 1
+    else
+      warn "Redis на '$RD_HOST' недоступен с этого хоста — проверьте сеть/брандмауэр/bind."
     fi
-    sleep 1
   fi
-  redis-cli -h 127.0.0.1 ping >/dev/null 2>&1 || { warn "Redis недоступен — поднимите его вручную."; exit 1; }
-  info "PostgreSQL и Redis работают."
+  timeout 5 redis-cli -h "$RD_HOST" -p "$RD_PORT" ping 2>/dev/null | grep -q PONG \
+    || { warn "Redis недоступен ($RD_HOST:$RD_PORT) — поднимите его вручную."; exit 1; }
+  info "PostgreSQL ($PG_HOST:$PG_PORT) и Redis ($RD_HOST:$RD_PORT) работают."
 }
 start_services
 
 # --- 5. роль и база ------------------------------------------------------------
-info "Проверяю роль/БД '$PG_USER' в PostgreSQL"
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS';"
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" | grep -q 1 || \
-  sudo -u postgres createdb -O "$PG_USER" "$PG_DB"
-# если роль уже есть, но пароля нет — задаём
-sudo -u postgres psql -c "ALTER ROLE $PG_USER LOGIN PASSWORD '$PG_PASS';" >/dev/null
+# Роль/БД создаём локально (sudo -u postgres) только если PostgreSQL реально локальный
+# (FORCE_LOCAL_SERVICES может принудительно поднять сервисы, но не даёт прав на чужой хост).
+PG_TRULY_LOCAL=false
+case "$PG_HOST" in localhost|127.0.0.1|::1|localhost.localdomain) PG_TRULY_LOCAL=true ;; esac
+if $PG_TRULY_LOCAL; then
+  # Если в .env указан внешний DATABASE_URL, но на этом хосте тоже стоит PostgreSQL,
+  # не даём случайному sudo-созданию роли «затенить» удалённую базу: убеждаемся, что
+  # локальный кластер слушает порт из URL. Если нет — пропускаем (роль на сервере).
+  if ! pg_isready -h 127.0.0.1 -p "$PG_PORT" -q 2>/dev/null; then
+    warn "На localhost:$PG_PORT нет PostgreSQL — роль/БД на нём не создаём (внешний сервер или другой порт)."
+  else
+    info "Проверяю роль/БД '$PG_USER' в локальном PostgreSQL"
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$PG_USER'" | grep -q 1 || \
+      sudo -u postgres psql -c "CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS';"
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$PG_DB'" | grep -q 1 || \
+      sudo -u postgres createdb -O "$PG_USER" "$PG_DB"
+    # если роль уже есть, но пароля нет — задаём
+    sudo -u postgres psql -c "ALTER ROLE $PG_USER LOGIN PASSWORD '$PG_PASS';" >/dev/null
+  fi
+else
+  info "PostgreSQL удалённый ($PG_HOST) — роль/БД создаются администратором сервера, пропускаю."
+fi
 
 # --- 6. схема -------------------------------------------------------------------
 info "Инициализация схемы БД"
