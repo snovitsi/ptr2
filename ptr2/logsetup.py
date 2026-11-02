@@ -58,16 +58,25 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
-class _HostFilter(logging.Filter):
-    """Добавляет record.host — полезно в распределённом режиме (N хостов)."""
+_HOSTNAME = socket.gethostname().split(".")[0]
+
+
+class HostFieldFilter(logging.Filter):
+    """Добавляет поле record.host для формата FMT — полезно в распределённом
+    режиме (N хостов пишут логи с меткой своего имени).
+
+    ВНИМАНИЕ: фильтр навешивается на ОБРАБОТЧИКИ, а не на логгер. Фильтры
+    логгеров применяются только к записям, созданным непосредственно этим
+    логгером, и НЕ наследуются дочерними логгерами: сообщение от
+    `ptr2.fetch`/`ptr2.schema` прошло бы мимо фильтра корневого логгера, и
+    формат %(host)s упал бы с KeyError при первой же записи.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "host"):
             record.host = _HOSTNAME  # type: ignore[attr-defined]
         return True
 
-
-_HOSTNAME = socket.gethostname().split(".")[0]
 
 FMT = "%(asctime)s %(levelname)-8s [%(host)s] [%(name)s] %(message)s"
 DATEFMT = "%Y-%m-%d %H:%M:%S"
@@ -110,8 +119,8 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
     root = logging.getLogger(DEFAULT_NAME)
     lvl = getattr(logging, str(level).upper(), logging.INFO)
     root.setLevel(lvl)
-    root.addFilter(_HostFilter())
     formatter = logging.Formatter(FMT, datefmt=DATEFMT)
+    host_filter = HostFieldFilter()
 
     if not _configured:
         for h in list(root.handlers):
@@ -124,6 +133,7 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
         if _env_bool("LOG_CONSOLE", True):
             sh = logging.StreamHandler(sys.stderr)
             sh.setFormatter(formatter)
+            sh.addFilter(host_filter)   # именно на handler: см. HostFieldFilter
             root.addHandler(sh)
 
         if to_file:
@@ -136,6 +146,7 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
+            fh.addFilter(host_filter)
             root.addHandler(fh)
             _file_handlers.append(fh)
             atexit.register(_flush_close_all)

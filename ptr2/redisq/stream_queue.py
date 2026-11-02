@@ -70,21 +70,23 @@ class StreamProducer:
         self.stream = stream
         self.maxlen = maxlen  # примерный trim (XADD ... MAXLEN ~N), чтобы Redis не раздувался
 
-    def send(self, payload: dict) -> str:
-        kwargs = {"nomkstream": True}
+    def _xadd_kwargs(self) -> dict:
+        # approximate=True — аргумент redis-py для `XADD ... MAXLEN ~N`
+        # (ключевого слова `approx` в клиенте нет ни в одной версии).
+        kwargs: dict = {"nomkstream": True}
         if self.maxlen:
             kwargs["maxlen"] = self.maxlen
-            kwargs["approx"] = True
-        return self.r.xadd(self.stream, _encode(payload), **kwargs)
+            kwargs["approximate"] = True
+        return kwargs
+
+    def send(self, payload: dict) -> str:
+        return self.r.xadd(self.stream, _encode(payload), **self._xadd_kwargs())
 
     def send_batch(self, payloads: list[dict], chunk: int = 500) -> int:
         n = 0
+        kwargs = self._xadd_kwargs()
         pipe = self.r.pipeline(transaction=False)
         for p in payloads:
-            kwargs = {"nomkstream": True}
-            if self.maxlen:
-                kwargs["maxlen"] = self.maxlen
-                kwargs["approx"] = True
             pipe.xadd(self.stream, _encode(p), **kwargs)
             n += 1
             if n % chunk == 0:
