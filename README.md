@@ -34,7 +34,7 @@ run_pipeline.sh          # bash-оркестратор всех этапов (Н
 setup_env.sh             # venv + зависимости + PG/Redis + роль/БД + схема
 requirements.txt         # redis, psycopg3, dnspython, aiohttp, tqdm
 .env.example -> .env     # конфигурация (читается ptr2/config.py)
-data/                    # кэш delegated-ripencc-latest
+data/                    # кэш delegated-ripencc-latest (создаётся автоматически, в .gitignore)
 logs/                    # логи этапов + общий pipeline.log (LOG_DIR)
 ptr2/
   config.py              # вся конфигурация из env/.env + хелперы producer/consumer
