@@ -90,7 +90,10 @@ def write_batch(cfg, items: list[dict], q_a, qa_stream) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--once", action="store_true", help="вычитать текущее и выйти")
+    ap.add_argument("--once", action="store_true",
+                    help="выйти, когда ptr_results опустеет (XLEN зависла + PEL чиста). "
+                         "ВНИМАНИЕ: в legacy-режиме (USE_STREAMS=false) --once выходит "
+                         "немедленно при первой пустоте очереди — в пайплайне там его не используют")
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--list-queue", action="store_true", help="принудительно старая списковая очередь")
     args = ap.parse_args()
@@ -110,6 +113,7 @@ def main() -> int:
         cons.ensure_group()
         qa_stream = producer(cfg.stream_a_checks)
         idle_rounds = 0
+        last_xlen = None
         while True:
             msgs = cons.read(count=batch, block_ms=2000)
             if not msgs:
@@ -117,12 +121,21 @@ def main() -> int:
                 msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=batch)
             if not msgs:
                 if args.once:
-                    if cons.depth() == 0 and cons.pending_total() == 0:
+                    # depth()==lag недоступен в Redis <7.2 (всегда 0): пока PTR-воркеры
+                    # ещё пишут ptr_results (XLEN растёт), ждём; зависла и PEL пуста -> выход.
+                    xlen = cons.r.xlen(cfg.stream_ptr_results)
+                    if xlen == last_xlen and cons.pending_total() == 0:
                         break
+                    last_xlen = xlen
                     idle_rounds += 1
-                    if idle_rounds > 5:
+                    if idle_rounds > 60:   # страховка: не более ~2 минут простоя
+                        log.warning("ptr_results: нет активности 60 раундов, выхожу "
+                                    "(depth=%s pending=%s xlen=%s)",
+                                    cons.depth(), cons.pending_total(), xlen)
                         break
                     time.sleep(1)
+                    continue
+                # вечный режим без --once: при пустоте идём дальше
                 continue
             idle_rounds = 0
             items = [payload for _, payload in msgs]

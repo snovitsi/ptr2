@@ -25,7 +25,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ptr2.common import db_conn  # noqa: E402
-from ptr2.logsetup import setup_logging, stage_done  # noqa: E402
+from ptr2.logsetup import setup_logging, stage_done, worker_tag  # noqa: E402
 from ptr2.config import get_config, consumer, producer  # noqa: E402
 from ptr2.dnslib import DnsClient  # noqa: E402
 from ptr2.redisq import SimpleQueue, get_redis  # noqa: E402
@@ -98,18 +98,29 @@ async def run(args) -> int:
         cons.ensure_group()
         out_p = producer(cfg.stream_web_checks)
         idle_rounds = 0
+        last_xlen = None
         while True:
             msgs = cons.read(count=args.batch, block_ms=2000)
             if not msgs:
                 msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=args.batch)
             if not msgs:
                 if args.once:
-                    if cons.depth() == 0 and cons.pending_total() == 0:
+                    # depth()==lag может быть недоступен в Redis <7.2 (всегда 0),
+                    # поэтому считаем длину стрима: пока она растёт, этап 03 ещё
+                    # добавляет задачи — ждём; зависла и PEL пуста -> выходим.
+                    xlen = cons.r.xlen(cfg.stream_a_checks)
+                    if xlen == last_xlen and cons.pending_total() == 0:
                         break
+                    last_xlen = xlen
                     idle_rounds += 1
-                    if idle_rounds > 5:
+                    if idle_rounds > 60:   # страховка: не более ~2 минут простоя
+                        log.warning("a_checks: нет активности 60 раундов, выхожу "
+                                    "(depth=%s pending=%s xlen=%s)",
+                                    cons.depth(), cons.pending_total(), xlen)
                         break
                     time.sleep(1)
+                    continue
+                # вечный режим без --once: при пустоте просто идём дальше
                 continue
             idle_rounds = 0
             pairs: list[tuple[str, str]] = []
@@ -188,7 +199,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = get_config()
-    setup_logging(cfg.log_level, name="check_a")
+    setup_logging(cfg.log_level, name="check_a", tag=worker_tag())
     return asyncio.run(run(args))
 
 

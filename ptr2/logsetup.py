@@ -99,6 +99,12 @@ def resolve_log_path(name: str | None, cfg_data_dir: str | None = None) -> str:
     return path
 
 
+def worker_tag() -> str:
+    """Суффикс имени процесса/файла лога из WORKER_TAG (его задаёт run_pipeline.sh
+    для параллельных воркеров одного этапа: "-01", "-02", ...)."""
+    return os.environ.get("WORKER_TAG", "")
+
+
 def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
                   to_file: bool | None = None, tag: str = "") -> logging.Logger:
     """Настраивает корневой логгер ptr2: консоль + файл с ротацией.

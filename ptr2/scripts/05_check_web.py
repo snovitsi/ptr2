@@ -28,7 +28,7 @@ import aiohttp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ptr2.common import db_conn  # noqa: E402
-from ptr2.logsetup import setup_logging, stage_done  # noqa: E402
+from ptr2.logsetup import setup_logging, stage_done, worker_tag  # noqa: E402
 from ptr2.config import get_config, consumer, producer  # noqa: E402
 from ptr2.redisq import SimpleQueue, get_redis  # noqa: E402
 
@@ -181,18 +181,27 @@ async def run(args) -> int:
         hosts_seen: set[str] = set()
         total = ok = 0
         idle_rounds = 0
+        last_xlen = None
         while True:
             msgs = cons.read(count=args.batch, block_ms=2000)
             if not msgs:
                 msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=args.batch)
             if not msgs:
                 if args.once:
-                    if cons.depth() == 0 and cons.pending_total() == 0:
+                    # depth()==lag недоступен в Redis <7.2 -> контролируем рост XLEN:
+                    # пока этап 04 добавляет задачи, ждём; зависла и PEL пуста -> выход.
+                    xlen = cons.r.xlen(cfg.stream_web_checks)
+                    if xlen == last_xlen and cons.pending_total() == 0:
                         break
+                    last_xlen = xlen
                     idle_rounds += 1
-                    if idle_rounds > 5:
+                    if idle_rounds > 60:   # страховка: не более ~2 минут простоя
+                        log.warning("web_checks: нет активности 60 раундов, выхожу "
+                                    "(depth=%s pending=%s xlen=%s)",
+                                    cons.depth(), cons.pending_total(), xlen)
                         break
                     time.sleep(1)
+                    continue
                 continue
             idle_rounds = 0
             names = [p["hostname"] for _, p in msgs
@@ -279,7 +288,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = get_config()
-    setup_logging(cfg.log_level, name="check_web")
+    setup_logging(cfg.log_level, name="check_web", tag=worker_tag())
     return asyncio.run(run(args))
 
 

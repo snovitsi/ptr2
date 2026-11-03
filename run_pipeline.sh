@@ -177,17 +177,38 @@ fi
 
 if should_run check_a; then
   banner "04. Проверка прямых A-записей у обнаруженных хостнеймов"
-  run_stage check_a "$PY" -m ptr2.scripts.04_check_a --from-queue
+  run_stage check_a "$PY" -m ptr2.scripts.04_check_a --from-queue --once
 fi
 
 if should_run check_web; then
   banner "05. Проверка доступности веб-серверов"
-  run_stage check_web "$PY" -m ptr2.scripts.05_check_web --from-queue
+  run_stage check_web "$PY" -m ptr2.scripts.05_check_web --from-queue --once
 fi
 
 if should_run check_owa; then
   banner "06. Поиск Outlook Web Access (OWA)"
-  run_stage owa "$PY" -m ptr2.scripts.06_check_owa --from-queue
+  if [[ "${USE_STREAMS:-true}" == "false" ]]; then
+    # legacy-списки: один воркер (--from-queue)
+    run_stage owa "$PY" -m ptr2.scripts.06_check_owa --from-queue
+  else
+    # streams: несколько потребителей одной consumer group (параллельно)
+    OWA_WORKERS=${OWA_WORKERS:-2}
+    stage_event owa_worker START workers=$OWA_WORKERS
+    PIDS=()
+    for i in $(seq 1 "$OWA_WORKERS"); do
+      WORKER_TAG="-$(printf '%02d' "$i")" \
+        "$PY" -m ptr2.scripts.06_check_owa --from-queue --once &
+      PIDS+=($!)
+    done
+    FAIL=0
+    for pid in "${PIDS[@]}"; do wait "$pid" || FAIL=1; done
+    if [[ $FAIL -eq 0 ]]; then
+      stage_event owa_worker DONE workers=$OWA_WORKERS
+    else
+      stage_event owa_worker FAIL workers=$OWA_WORKERS note="часть OWA-воркеров завершилась с ошибкой"
+      echo "[WARN] часть OWA-воркеров завершилась с ошибкой (см. $LOG_DIR/owa*.log)" >&2
+    fi
+  fi
 fi
 
 if should_run report; then

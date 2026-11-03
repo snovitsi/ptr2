@@ -29,7 +29,7 @@ import aiohttp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ptr2.common import db_conn  # noqa: E402
-from ptr2.logsetup import setup_logging, stage_done  # noqa: E402
+from ptr2.logsetup import setup_logging, stage_done, worker_tag  # noqa: E402
 from ptr2.config import get_config  # noqa: E402
 from ptr2.owa_version import extract_versions, resolve_version  # noqa: E402
 from ptr2.redisq import SimpleQueue, get_redis  # noqa: E402
@@ -278,7 +278,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = get_config()
-    setup_logging(cfg.log_level, name="owa")
+    setup_logging(cfg.log_level, name="owa", tag=worker_tag())
     return asyncio.run(run(args))
 
 
