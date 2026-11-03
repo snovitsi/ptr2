@@ -141,12 +141,21 @@ async def stream_loop(worker_no: int, cfg, dns: DnsClient, in_c, out_p, queue_on
             msgs = stale or in_c.read(count=10, block_ms=2000)
             if not msgs:
                 if once:
-                    # «вычитано всё» — выходим, когда нет ни новых, ни зависших
-                    if in_c.depth() == 0 and in_c.pending_total() == 0:
-                        break
+                    # depth()==lag недоступен в Redis <7.2 — ориентируемся на PEL:
+                    # свои незакрытые задачи есть -> работаем; пусто и 3 раунда тишины
+                    # (6 с) -> других воркеров дождёмся через claim_stale ниже.
+                    pend = in_c.pending_total()
+                    if pend > 0:
+                        idle_rounds = 0
+                        continue
                     idle_rounds += 1
-                    if idle_rounds > 5:
-                        break
+                    if idle_rounds > 3:
+                        stale = in_c.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=10)
+                        if stale:
+                            idle_rounds = 0
+                            msgs = stale
+                        else:
+                            break
                     continue
                 continue
             idle_rounds = 0
@@ -309,9 +318,9 @@ async def run(args) -> int:
             pass
 
     if use_streams:
-        if args.once and all(c.depth() == 0 for c in consumers):
-            log.info("Stream пуст (--once), выходим")
-            return 0
+        # НЕ выходим по «пустому» depth(): lag группы недоступен в Redis <7.2,
+        # а другие воркеры могли только взять задачи в работу (PEL>0).
+        # stream_loop сам завершится по PEL+claim_stale или на --max-shards.
         tasks = [
             asyncio.create_task(
                 stream_loop(i + 1, cfg, dns, consumers[i % len(consumers)], out_p,
@@ -350,7 +359,9 @@ def main() -> int:
     ap.add_argument("--no-spread", action="store_true",
                     help="отключить глобальный лимит одновременных /24-семей (анти-BAN)")
     args = ap.parse_args()
-    args.worker_id_tag = ""
+    # тег экземпляра из run_pipeline.sh (WORKER_TAG="-01") — уникальность имён
+    # потребителей в группе при нескольких воркерах на одном хосте
+    args.worker_id_tag = os.environ.get("WORKER_TAG", "")
 
     if args.worker_id:
         os.environ["WORKER_ID"] = args.worker_id
@@ -359,10 +370,11 @@ def main() -> int:
     # каждый воркер пишет в отдельный файл logs/ptr_worker-<NN>.log
     setup_logging(cfg.log_level, name="ptr_worker",
                   tag=os.environ.get("WORKER_TAG", ""))
-    log.info("Конфигурация: redis=%s pg=%s streams=%s consumer=%s",
+    # строки помечаются тегом процесса через формат [%(worker)s] (см. logsetup)
+    log.info("Конфигурация: redis=%s pg=%s streams=%s consumer=%s pid=%d",
              cfg.redis_url.split("@")[-1], cfg.database_url.split("@")[-1],
              cfg.streams_enabled and not args.list_queue,
-             os.environ.get("WORKER_ID") or "hostname:pid")
+             os.environ.get("WORKER_ID") or "hostname:pid", os.getpid())
     return asyncio.run(run(args))
 
 

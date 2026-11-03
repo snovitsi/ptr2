@@ -109,8 +109,6 @@ async def run(args) -> int:
                     # поэтому считаем длину стрима: пока она растёт, этап 03 ещё
                     # добавляет задачи — ждём; зависла и PEL пуста -> выходим.
                     xlen = cons.r.xlen(cfg.stream_a_checks)
-                    if xlen == last_xlen and cons.pending_total() == 0:
-                        break
                     last_xlen = xlen
                     idle_rounds += 1
                     if idle_rounds > 60:   # страховка: не более ~2 минут простоя

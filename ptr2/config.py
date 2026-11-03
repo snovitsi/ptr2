@@ -207,6 +207,9 @@ class Config:
     # воркер считает задачу «зависшей» (упал хост) после простоя без ack; мс
     claim_idle_ms: int = field(default_factory=lambda: _env_int("CLAIM_IDLE_MS", 120000))
     worker_id: str = field(default_factory=lambda: _env("WORKER_ID", ""))  # пусто = hostname:pid
+    # тег экземпляра воркера (env WORKER_TAG, напр. "-01"): гарантирует уникальность
+    # имён потребителей в группе, когда на одном хосте стартует несколько процессов
+    worker_tag: str = field(default_factory=lambda: _env("WORKER_TAG", ""))
 
     # --- служебное ----------------------------------------------------------
     db_batch_size: int = field(default_factory=lambda: _env_int("DB_BATCH_SIZE", 1000))
@@ -267,6 +270,8 @@ def consumer(queue: str, group: str | None = None, suffix: str = "",
         from .redisq import StreamConsumer
 
         name = cfg.worker_id or f"{__import__('socket').gethostname()}:{os.getpid()}"
+        if cfg.worker_tag:               # WORKER_TAG из run_pipeline.sh (уникальность на хосте)
+            name = f"{name}{cfg.worker_tag}"
         if suffix:
             name = f"{name}-{suffix}"
         return StreamConsumer(

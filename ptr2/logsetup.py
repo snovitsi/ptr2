@@ -78,7 +78,26 @@ class HostFieldFilter(logging.Filter):
         return True
 
 
-FMT = "%(asctime)s %(levelname)-8s [%(host)s] [%(name)s] %(message)s"
+class WorkerFieldFilter(logging.Filter):
+    """Добавляет поле record.worker ("-" если тег не задан env WORKER_TAG).
+
+    Нужен, чтобы в общем логе (pipeline.log/консоль) строки нескольких
+    процессов-воркеров с одинаковой меткой [w1] различались: префикс
+    формата печатает [%(worker)s]. Как и HostFieldFilter, вешается на
+    обработчики — только так он видит записи дочерних логгеров.
+    """
+
+    def __init__(self, tag: str | None = None):
+        super().__init__()
+        self.tag = tag if tag is not None else _env("WORKER_TAG", "")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "worker"):
+            record.worker = self.tag.strip("-") or "-"  # type: ignore[attr-defined]
+        return True
+
+
+FMT = "%(asctime)s %(levelname)-8s [%(host)s] [%(name)s] [%(worker)s] %(message)s"
 DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -117,6 +136,9 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
                  (или в один общий — если tag одинаковый у группы воркеров).
     :return: логгер `ptr2.<name>` для непосредственной записи.
     """
+    # НЕ сбрасываем уже настроенные обработчики: несколько вызовов (разные этапы
+    # в одном процессе) не должны лишать консольный обработчик фильтров host/worker,
+    # иначе %(host)s/%(worker)s выпадают с KeyError для записей после 1-го вызова.
     global _configured
 
     if to_file is None:
@@ -127,6 +149,7 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
     root.setLevel(lvl)
     formatter = logging.Formatter(FMT, datefmt=DATEFMT)
     host_filter = HostFieldFilter()
+    worker_filter = WorkerFieldFilter()
 
     if not _configured:
         for h in list(root.handlers):
@@ -139,7 +162,8 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
         if _env_bool("LOG_CONSOLE", True):
             sh = logging.StreamHandler(sys.stderr)
             sh.setFormatter(formatter)
-            sh.addFilter(host_filter)   # именно на handler: см. HostFieldFilter
+            sh.addFilter(host_filter)     # именно на handler: см. HostFieldFilter
+            sh.addFilter(worker_filter)
             root.addHandler(sh)
 
         if to_file:
@@ -153,6 +177,7 @@ def setup_logging(level: str = "INFO", name: str = DEFAULT_NAME,
             )
             fh.setFormatter(formatter)
             fh.addFilter(host_filter)
+            fh.addFilter(worker_filter)
             root.addHandler(fh)
             _file_handlers.append(fh)
             atexit.register(_flush_close_all)

@@ -121,11 +121,10 @@ def main() -> int:
                 msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=batch)
             if not msgs:
                 if args.once:
-                    # depth()==lag недоступен в Redis <7.2 (всегда 0): пока PTR-воркеры
-                    # ещё пишут ptr_results (XLEN растёт), ждём; зависла и PEL пуста -> выход.
+                    # depth()==lag недоступен в Redis <7.2 (всегда 0): ждём данных от
+                    # продюсера; 12 раундов (~12 с) без новых задач и пустой PEL -> выход
+                    # (страховка idle_rounds>60 на случай зависшего продюсера).
                     xlen = cons.r.xlen(cfg.stream_ptr_results)
-                    if xlen == last_xlen and cons.pending_total() == 0:
-                        break
                     last_xlen = xlen
                     idle_rounds += 1
                     if idle_rounds > 60:   # страховка: не более ~2 минут простоя

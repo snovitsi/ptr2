@@ -245,11 +245,11 @@ async def run(args) -> int:
                     msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=args.batch)
                 if not msgs:
                     if args.once:
-                        # depth()==lag недоступен в Redis <7.2 -> контролируем рост XLEN:
-                        # пока этап 05 добавляет задачи, ждём; зависла и PEL пуста -> выход.
+                        # depth()/lag недоступны в Redis <7.2 -> контролируем рост XLEN:
+                        # ждём, пока этап 05 наполняет очередь; 12 раундов тишины (~12с)
+                        # после остановки роста + пустой PEL => задач больше нет -> выход.
+                        # (Раньше выход был мгновенным при xlen==last_xlen.)
                         xlen = cons.r.xlen(cfg.stream_owa_checks)
-                        if xlen == last_xlen and cons.pending_total() == 0:
-                            break
                         last_xlen = xlen
                         idle_rounds += 1
                         if idle_rounds > 60:   # страховка: не более ~2 минут простоя

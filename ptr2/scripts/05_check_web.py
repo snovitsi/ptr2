@@ -191,8 +191,6 @@ async def run(args) -> int:
                     # depth()==lag недоступен в Redis <7.2 -> контролируем рост XLEN:
                     # пока этап 04 добавляет задачи, ждём; зависла и PEL пуста -> выход.
                     xlen = cons.r.xlen(cfg.stream_web_checks)
-                    if xlen == last_xlen and cons.pending_total() == 0:
-                        break
                     last_xlen = xlen
                     idle_rounds += 1
                     if idle_rounds > 60:   # страховка: не более ~2 минут простоя
