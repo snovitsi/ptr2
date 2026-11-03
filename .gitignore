@@ -1,2 +1,11 @@
-*.tar
-*.tar.gz
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+logs/
+*.log
+*.tmp
+.vscode/
+.idea/

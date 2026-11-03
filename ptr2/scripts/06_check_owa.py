@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Шаг 5: поиск Outlook Web Access (Exchange OWA/ECP) за доступными веб-серверами.
 
-Для каждого хоста из очереди ptr2:queue:owa_checks (или из web_checks.reachable=TRUE):
+Для каждого хоста из очереди ptr2:stream:owa_checks (или ptr2:queue:owa_checks
+в legacy-режиме, либо из web_checks.reachable=TRUE при --from-db):
  1) пробует пути /owa/, /owa/auth/logon.aspx, /autodiscover/autodiscover.xml;
  2) анализирует редиректы базовых страниц (частый признак Exchange:
     / -> /owa или /owa/auth/logon.aspx);
@@ -9,9 +10,13 @@
     "Microsoft.Exchange.Clients.Owa", x-owa-version, feOwaVersion и т.п.).
 
 Результат — таблица owa_checks (is_owa, confidence, evidence).
+В режиме потоков (по умолчанию) работает как распределённый воркер: Redis Stream
++ consumer group, несколько экземпляров параллельно; --once завершает воркер,
+когда очередь пуста и не растёт (аналогично этапам 04/05).
 
 Использование:
-    python -m ptr2.scripts.06_check_owa [--from-queue] [--from-db --limit N]
+    python -m ptr2.scripts.06_check_owa [--from-queue [--once]] [--list-queue]
+                                        [--from-db --limit N]
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from ptr2.logsetup import setup_logging, stage_done, worker_tag  # noqa: E402
 from ptr2.config import get_config  # noqa: E402
 from ptr2.owa_version import extract_versions, resolve_version  # noqa: E402
 from ptr2.redisq import SimpleQueue, get_redis  # noqa: E402
+from ptr2.config import consumer  # noqa: E402
 
 log = logging.getLogger("ptr2.owa")
 
@@ -201,9 +207,13 @@ async def run(args) -> int:
                 return h, await check_host(cfg, session, h)
 
         results = await asyncio.gather(*(guarded(h) for h in hosts))
+        rows_written = 0
         with db_conn(cfg.dsn()) as conn, conn.cursor() as cur:
             for host, rows in results:
                 for row in rows:
+                    # в owa_checks пишем только строки с определённой версией OWA/Exchange
+                    if not row.get("exchange_version"):
+                        continue
                     cur.execute(
                         UPSERT_OWA_SQL,
                         (row["hostname"], row["url"], row["probe_url"], row["is_owa"],
@@ -211,6 +221,7 @@ async def run(args) -> int:
                          row["redirect_chain"], row.get("exchange_version"),
                          row.get("build_number"), row.get("version_source")),
                     )
+                    rows_written += 1
                     if row["is_owa"]:
                         found += 1
             cur.close()
@@ -219,9 +230,55 @@ async def run(args) -> int:
     async with aiohttp.ClientSession(
         connector=connector, timeout=timeout, headers={"User-Agent": cfg.user_agent}
     ) as session:
+        use_streams = cfg.streams_enabled and not args.list_queue
+
+        if args.from_queue and use_streams:
+            # распределённый воркер: Redis Stream + consumer group (несколько экземпляров)
+            cons = consumer(cfg.stream_owa_checks, suffix="owa")
+            cons.ensure_group()
+            total = hits = 0
+            idle_rounds = 0
+            last_xlen = None
+            while True:
+                msgs = cons.read(count=args.batch, block_ms=2000)
+                if not msgs:
+                    msgs = cons.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=args.batch)
+                if not msgs:
+                    if args.once:
+                        # depth()==lag недоступен в Redis <7.2 -> контролируем рост XLEN:
+                        # пока этап 05 добавляет задачи, ждём; зависла и PEL пуста -> выход.
+                        xlen = cons.r.xlen(cfg.stream_owa_checks)
+                        if xlen == last_xlen and cons.pending_total() == 0:
+                            break
+                        last_xlen = xlen
+                        idle_rounds += 1
+                        if idle_rounds > 60:   # страховка: не более ~2 минут простоя
+                            log.warning("owa_checks: нет активности 60 раундов, выхожу "
+                                        "(depth=%s pending=%s xlen=%s)",
+                                        cons.depth(), cons.pending_total(), xlen)
+                            break
+                        time.sleep(1)
+                        continue
+                    continue
+                idle_rounds = 0
+                hosts = sorted({p["hostname"] for _, p in msgs if p.get("hostname")})
+                if hosts:
+                    n, f = await process(hosts, session)
+                    total += n
+                    hits += f
+                cons.ack(*[mid for mid, _ in msgs])
+                log.info("OWA: хостов %d, OWA-подтверждений %d", total, hits)
+            stage_done("owa", hosts_checked=total, owa_rows=hits, mode="stream")
+            print({"hosts_checked": total, "owa_rows": hits})
+            return 0
+
         if args.from_queue:
             r = get_redis(cfg.redis_url)
             q_in = SimpleQueue(r, cfg.queue_owa_checks)
+            # зависшие в processing задачи (например, после Ctrl+C воркера) — обратно в очередь
+            reclaimed = q_in.reclaim_stale(max_idle_sec=cfg.claim_idle_ms // 1000)
+            if reclaimed:
+                log.info("OWA: возвращено в очередь %d зависших задач", reclaimed)
             total = owa_hits = 0
             while True:
                 items = []
@@ -271,8 +328,13 @@ async def run(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     src = ap.add_mutually_exclusive_group()
-    src.add_argument("--from-queue", action="store_true", help="воркер: читать owa_checks из Redis")
+    src.add_argument("--from-queue", action="store_true",
+                     help="воркер: читать owa_checks из Redis (stream по умолчанию)")
     src.add_argument("--from-db", action="store_true", help="выборка из web_checks (default)")
+    ap.add_argument("--list-queue", action="store_true",
+                    help="использовать legacy-список вместо Streams")
+    ap.add_argument("--once", action="store_true",
+                    help="(streams) выйти, когда очередь пуста и не растёт")
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--batch", type=int, default=50)
     args = ap.parse_args()
