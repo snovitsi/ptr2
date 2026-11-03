@@ -132,13 +132,43 @@ should_run() {
 
 banner() { echo -e "\n\033[1;35m==== $1 ====\033[0m"; }
 
+# --- Graceful shutdown: Ctrl-C/SIGTERM по всему дереву процессов ------------
+# По умолчанию bash убивает только run_pipeline.sh, а python-воркеры осиротели:
+# их нельзя было остановить с терминала (сигнал уходил «в никуда») — они крутились
+# в фоне и держали Redis/PG соединения. Теперь при прерывании пайплайна всем
+# детям (группа процессов) шлётся SIGINT, через 20с — SIGKILL.
+CHILD_PGID=""
+shutdown_tree() {
+  [[ -n "$CHILD_PGID" ]] || return 0
+  echo -e "\n[ptr2] Прерывание: посылаю SIGINT группе процессов $CHILD_PGID " \
+          "(дожимание незавершённых задач воркерами до 20с)..." >&2
+  kill -INT -"$CHILD_PGID" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    kill -0 -"$CHILD_PGID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 -"$CHILD_PGID" 2>/dev/null; then
+    echo "[ptr2] Воркеры не завершились за 20с — SIGKILL группы $CHILD_PGID" >&2
+    kill -KILL -"$CHILD_PGID" 2>/dev/null || true
+  fi
+  CHILD_PGID=""
+}
+trap 'shutdown_tree; exit 130' INT
+trap 'shutdown_tree; exit 143' TERM
+
 # run_stage <stage> <команда...>: логирует START/DONE/FAIL в pipeline.log
 run_stage() {
   local stage=$1; shift
   local t0 rc
   t0=$(date +%s)
   stage_event "$stage" START
-  if "$@"; then rc=0; else rc=$?; fi
+  if command -v setsid >/dev/null 2>&1; then
+    # дети в отдельной группе процессов — shutdown_tree достанет их всех
+    setsid "$@" &
+    CHILD_PGID=$!
+    if wait -n "$CHILD_PGID"; then rc=0; else rc=$?; fi
+    CHILD_PGID=""
+  elif "$@"; then rc=0; else rc=$?; fi
   local dur=$(( $(date +%s) - t0 ))
   if [[ $rc -eq 0 ]]; then
     stage_event "$stage" DONE seconds=$dur
@@ -166,14 +196,37 @@ fi
 if should_run ptr; then
   banner "02. PTR-обход адресов ($PTR_WORKERS воркеров параллельно)"
   stage_event ptr_worker START workers=$PTR_WORKERS
-  PIDS=()
-  for i in $(seq 1 "$PTR_WORKERS"); do
-    WORKER_TAG="-$(printf '%02d' "$i")" \
-      "$PY" -m ptr2.scripts.02_ptr_worker --once --reclaim &
-    PIDS+=($!)
-  done
+  # Воркеры — в отдельной группе процессов (setsid), чтобы Ctrl-C/shutdown_tree
+  # достал их всех; без setsid — как раньше, фоновые PID этого этапа.
+  PTR_PGID=""
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash -c '
+      PIDS=()
+      for i in $(seq 1 "$1"); do
+        WORKER_TAG="-$(printf "%02d" "$i")' "'""$PY"' -m ptr2.scripts.02_ptr_worker --once --reclaim &
+        PIDS+=($!)
+      done
+      FAIL=0
+      for pid in "${PIDS[@]}"; do wait "$pid" || FAIL=1; done
+      exit $FAIL' _ "$PTR_WORKERS" &
+    PTR_PGID=$!
+    CHILD_PGID=$PTR_PGID
+    if wait -n "$PTR_PGID"; then PTR_RC=0; else PTR_RC=$?; fi
+    CHILD_PGID=""
+    PIDS=()
+  else
+    for i in $(seq 1 "$PTR_WORKERS"); do
+      WORKER_TAG="-$(printf '%02d' "$i")" \
+        "$PY" -m ptr2.scripts.02_ptr_worker --once --reclaim &
+      PIDS+=($!)
+    done
+  fi
   FAIL=0
-  for pid in "${PIDS[@]}"; do wait "$pid" || FAIL=1; done
+  if [[ -z "$PTR_PGID" ]]; then
+    for pid in "${PIDS[@]}"; do wait "$pid" || FAIL=1; done
+  elif [[ ${PTR_RC:-0} -ne 0 ]]; then
+    FAIL=1
+  fi
   if [[ $FAIL -eq 0 ]]; then
     stage_event ptr_worker DONE workers=$PTR_WORKERS
   else

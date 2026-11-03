@@ -77,9 +77,16 @@ async def process_shard(task: dict, dns: DnsClient, emit, cfg) -> int:
             results.append({"ip": ip, "hostname": h, "shard_id": shard_id})
 
     chunk = max(cfg.ptr_concurrency * 2, 32)
+    t_start = time.monotonic()
+    last_beat = t_start
     for i in range(0, len(ips), chunk):
         if STOP.is_set():
             break
+        now = time.monotonic()
+        if now - last_beat >= 15:  # heartbeat: видно, что обход идёт, а не завис
+            log.info("... shard %s: опрос %d/%d адресов (%.0fс)",
+                     shard_id, min(i, len(ips)), len(ips), now - t_start)
+            last_beat = now
         batch = ips[i : i + chunk]
         await asyncio.gather(*(one(ip) for ip in batch))
     if results:
@@ -131,13 +138,34 @@ async def stream_loop(worker_no: int, cfg, dns: DnsClient, in_c, out_p, queue_on
     failed = 0
     idle_rounds = 0
     t0 = time.time()
+    last_beat = t0
     held: list[str] = []
+
+    def _heartbeat(pend_now: int) -> None:
+        nonlocal last_beat
+        now = time.time()
+        if now - last_beat >= 30:
+            log.info("[w%d] жив, но жду работу: обработано %d, PEL группы=%d, %.0fс",
+                     worker_no, processed, pend_now, now - t0)
+            last_beat = now
+
     try:
         while not STOP.is_set():
             if max_shards and processed >= max_shards:
                 break
-            # 1) сначала перехватываем зависшие задачи (после падения других хостов)
-            stale = in_c.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=10) if processed == 0 or idle_rounds else []
+            # 1) сначала перехватываем зависшие задачи (после падения других хостов).
+            #    min_idle берём из аренды SpreadGuard: задача «зависла» честно, если
+            #    её воркер мёртв (слот семьи истёк) или превысил CLAIM_IDLE_MS.
+            claim_idle = max(cfg.claim_idle_ms,
+                             (cfg.spread_lease_sec + 15) * 1000) if guard is not None \
+                else cfg.claim_idle_ms
+            # НЕ перехватываем чужие задачи на старте: живой воркер-владелец
+            # может держать шард в работе дольше CLAIM_IDLE_MS (медленный DNS),
+            # а XAUTOCLAIM отдаёт сообщения ВЛАДЕЛЬЦУ — двойная работа и лишний
+            # BAN-риск. Перехват нужен только при простое этого цикла и для
+            # задач после падения хоста (их больше никто не читает).
+            stale = in_c.claim_stale(min_idle_ms=claim_idle, count=10) \
+                if idle_rounds else []
             msgs = stale or in_c.read(count=10, block_ms=2000)
             if not msgs:
                 if once:
@@ -147,10 +175,11 @@ async def stream_loop(worker_no: int, cfg, dns: DnsClient, in_c, out_p, queue_on
                     pend = in_c.pending_total()
                     if pend > 0:
                         idle_rounds = 0
+                        _heartbeat(pend)
                         continue
                     idle_rounds += 1
                     if idle_rounds > 3:
-                        stale = in_c.claim_stale(min_idle_ms=cfg.claim_idle_ms, count=10)
+                        stale = in_c.claim_stale(min_idle_ms=claim_idle, count=10)
                         if stale:
                             idle_rounds = 0
                             msgs = stale
@@ -167,13 +196,21 @@ async def stream_loop(worker_no: int, cfg, dns: DnsClient, in_c, out_p, queue_on
                 if guard is not None:
                     got = await acquire_family_async(guard, fam, STOP, worker_no, once)
                     if not got:
-                        in_c.release_unprocessed(msg_id)  # вернём в PEL на следующий заход
+                        # сигнал остановки: вернуть в PEL со СБРОСOM idle, чтобы
+                        # живой воркер перехватил задачу сразу (не через 120с)
+                        in_c.release_unprocessed(msg_id)
                         continue
                     held.append(fam)
                 try:
                     n = await process_shard(task, dns, out_p.send_batch, cfg)
                     log.info("[w%d] shard %s (%s): найдено %d хостнеймов", worker_no,
                              task.get("shard_id"), fam, n)
+                    if STOP.is_set():
+                        # прерваны Ctrl-C/_SIGTERM в середине обхода: результат
+                        # неполный -> НЕ ack'ем; вернуть в PEL со сбросом idle,
+                        # живой воркер дообработает семью целиком
+                        in_c.release_unprocessed(msg_id)
+                        continue
                     if not queue_only:
                         _mark_shard(cfg, task.get("shard_id"), "done")
                     in_c.ack(msg_id)
@@ -193,10 +230,15 @@ async def stream_loop(worker_no: int, cfg, dns: DnsClient, in_c, out_p, queue_on
                 finally:
                     if guard is not None and held and held[-1] == fam:
                         guard.release(held.pop())
+            if STOP.is_set():
+                break
     finally:
         if guard is not None:
             for fam in reversed(held):
                 guard.release(fam)
+    if STOP.is_set():
+        log.warning("[w%d] остановлен по сигналу (SIGINT/SIGTERM): обработано шардов %d за %.1fс",
+                    worker_no, processed, time.time() - t0)
     log.info("[w%d] завершил работу: обработано шардов %d за %.1fс",
              worker_no, processed, time.time() - t0)
     stage_event("ptr_worker", "INFO", worker=worker_no, shards_done=processed,
@@ -311,9 +353,16 @@ async def run(args) -> int:
     )
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+    def _on_stop(sig_name: str) -> None:
+        if not STOP.is_set():
+            log.warning("Получен %s — завершаю воркеры (прерву текущие чанки DNS-опроса)...",
+                        sig_name)
+        STOP.set()
+
+    for sig, name in ((signal.SIGINT, "SIGINT"), (signal.SIGTERM, "SIGTERM")):
         try:
-            loop.add_signal_handler(sig, STOP.set)
+            loop.add_signal_handler(sig, _on_stop, name)
         except NotImplementedError:
             pass
 

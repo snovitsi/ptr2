@@ -205,13 +205,24 @@ class StreamConsumer:
             self.r.xack(self.stream, self.group, *msg_ids)
 
     def release_unprocessed(self, *msg_ids: str) -> None:
-        """Ничего не делает: сообщение остаётся в PEL этого потребителя.
+        """Возврат невзятых в работу сообщений обратно в PEL группы.
 
-        Используется, когда воркер НЕ смог приступить к задаче (например, ждёт
-        освобождения /24-семьи в SpreadGuard): задача уже «нашлась» нам и будет
-        перехвачена через min_idle_ms (claim_stale) — повторной обработки нет,
-        но и в потерях тоже.
+        XCLAIM с idle=0: сообщения остаются в PEL, но их счётчик простоя
+        обнуляется — claim_stale() другого воркера перехватит их сразу, а не
+        через CLAIM_IDLE_MS. Используется, когда воркер НЕ смог приступить к
+        задаче (например, слот /24-семьи занят в SpreadGuard или получен
+        сигнал остановки). Раньше это был no-op: задача застревала в PEL
+        занятого воркера на весь CLAIM_IDLE_MS (120с), а при --once оба
+        воркера зависали во взаимном ожидании.
         """
+        if not msg_ids:
+            return
+        try:
+            self.r.xclaim(self.stream, self.group, self.consumer,
+                          min_idle_time=0, message_ids=list(msg_ids))
+        except redis.exceptions.ResponseError as e:
+            if "NOGROUP" not in str(e):
+                raise
 
     def depth(self) -> int:
         """Приблизительное число необработанных сообщений (Lag по XINFO GROUPS)."""
