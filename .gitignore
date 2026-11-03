@@ -1,14 +1,2 @@
-__pycache__/
-*.pyc
-# локальные секреты/конфигурация (шаблон .env.example — в репозитории)
-.env
-.env.local
-.venv/
-logs/
-*.log
-
-# архивы снимков рабочего окружения
-workspace*.tar
-
-# Данные RIPE скачиваются автоматически скриптом 00_fetch_ripe.py
-data/
+*.tar
+*.tar.gz
