@@ -36,6 +36,7 @@ NO_APT=0
 
 info() { echo -e "\033[1;36m[ptr2]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[ptr2][WARN]\033[0m $*"; }
+err()  { echo -e "\033[1;31m[ptr2][ERROR]\033[0m $*" >&2; exit 1; }
 
 # --- 1. системные пакеты -----------------------------------------------------
 if [[ $NO_APT -eq 0 ]]; then
@@ -57,9 +58,28 @@ if [[ $NO_APT -eq 0 ]]; then
 fi
 
 # --- 2. python venv + зависимости --------------------------------------------
+# ВАЖНО: python3-venv/debinstall может отсутствовать (без apt или в docker-образах
+# без него) — проверяем до создания venv и ставим доступными способами.
+if ! python3 -m venv --help >/dev/null 2>&1; then
+  info "Модуль venv недоступен — пробую установить python3-venv"
+  if command -v apt-get >/dev/null 2>&1; then
+    (sudo apt-get update -y && sudo apt-get install -y python3-venv python3-pip) || \
+      warn "apt-установка python3-venv не удалась"
+  fi
+fi
 if [[ ! -d "$VENV" ]]; then
   info "Создаю виртуальное окружение $VENV"
-  python3 -m venv "$VENV"
+  if ! python3 -m venv "$VENV"; then
+    # запасной вариант: virtualenv через pipx/pip (работает без python3-venv)
+    if python3 -m pip install -q --user virtualenv 2>/dev/null || \
+       python3 -m pip install -q virtualenv 2>/dev/null; then
+      info "Использую virtualenv вместо venv"
+      python3 -m virtualenv "$VENV"
+    else
+      err "Не удалось создать виртуальное окружение: установите python3-venv "\
+          "(apt/dnf/apk) или virtualenv (pip) вручную."
+    fi
+  fi
 fi
 info "Устанавливаю python-зависимости"
 "$VENV/bin/pip" install --upgrade pip -q

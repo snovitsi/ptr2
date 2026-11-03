@@ -3,6 +3,12 @@
 
 Использование:
     python -m ptr2.scripts.00_fetch_ripe [--url URL] [--file FILE] [--limit N]
+                                         [--force-download]
+
+Экономия трафика: файл RIPE обновляется ~1 раз в сутки, поэтому скачивание
+выполняется только если локальной копии нет, ей больше RIPE_CACHE_TTL_HOURS
+(по умолчанию 24 ч) или изменился SHA-256 содержимого (HEAD+GET проверка).
+Можно принудительно скачать заново: --force-download / FORCE_DOWNLOAD=true.
 
 Скрипт идемпотентен: строки UPSERT'ятся по (start_ip, end_ip, type).
 """
@@ -11,11 +17,13 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import ipaddress
 import logging
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 # добавляем корень проекта, если запускаем файл напрямую
@@ -43,8 +51,67 @@ ON CONFLICT (start_ip, end_ip, type) DO UPDATE
 """
 
 
-def download(url: str, dest: str) -> str:
-    log.info("Скачиваю %s -> %s", url, dest)
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fetch(url: str, dest: str, force: bool = False, ttl_hours: float = 24.0) -> str:
+    """Скачать RIPE-файл только если он реально нужен (экономия трафика).
+
+    Пропускаем скачивание, когда локальная копия свежая (moldestage < ttl)
+    И удалённое содержимое не изменилось по SHA-256. Быстрая проверка через
+    HEAD (Content-Length / Last-Modified / ETag); если HEAD неприменим —
+    GET с сравнением хеша. Любая сетевая ошибка при проверке -> скачиваем.
+    """
+    reason = None
+    if force:
+        reason = "--force-download"
+    elif not os.path.exists(dest):
+        reason = "локальной копии нет"
+    else:
+        age_h = (time.time() - os.path.getmtime(dest)) / 3600.0
+        if age_h >= ttl_hours:
+            reason = f"копии {age_h:.1f} ч (> TTL {ttl_hours:g} ч)"
+
+    if reason is None:
+        local_size = os.path.getsize(dest)
+        try:  # быстрая HEAD-проверка: размер/ETag/Last-Modified
+            head = urllib.request.Request(url, method="HEAD",
+                                          headers={"User-Agent": "ptr2/1.0"})
+            with urllib.request.urlopen(head, timeout=30) as resp:
+                clen = resp.headers.get("Content-Length")
+                remote_etag = resp.headers.get("ETag")
+                remote_lm = resp.headers.get("Last-Modified")
+            if clen and int(clen) != local_size:
+                reason = f"размер изменился ({local_size} -> {clen})"
+            else:
+                # размер тот же или неизвестен — сверяем контрольную сумму GET'ом
+                log.info("Проверяю актуальность RIPE-файла (HEAD ok, сверяю SHA-256)…")
+                get = urllib.request.Request(url, headers={"User-Agent": "ptr2/1.0"})
+                with urllib.request.urlopen(get, timeout=120) as resp:
+                    data = resp.read()
+                if data[:2] == b"\x1f\x8b":
+                    data = gzip.decompress(data)
+                if _sha256_bytes(data) != _sha256_file(dest):
+                    reason = "содержимое изменилось (SHA-256)"
+                else:
+                    log.info("RIPE-файл не менялся (TTL %.0f ч, SHA-256 совпадает) — "
+                             "скачивание пропущено: %s", ttl_hours, dest)
+                    return dest
+        except Exception as exc:  # noqa: BLE001 — сеть недоступна: консервативно используем локальный файл
+            log.warning("Не удалось проверить актуальность (%s) — использую локальную копию %s",
+                        exc, dest)
+            return dest
+
+    log.info("Скачиваю %s -> %s (%s)", url, dest, reason)
     req = urllib.request.Request(url, headers={"User-Agent": "ptr2/1.0"})
     with urllib.request.urlopen(req, timeout=120) as resp:
         data = resp.read()
@@ -54,7 +121,7 @@ def download(url: str, dest: str) -> str:
     with open(tmp, "wb") as fh:
         fh.write(data)
     os.replace(tmp, dest)
-    log.info("Скачано %d байт", len(data))
+    log.info("Скачано %d байт (SHA-256 %s…)", len(data), _sha256_bytes(data)[:16])
     return dest
 
 
@@ -134,6 +201,8 @@ def main() -> int:
     ap.add_argument("--file", default=None, help="Локальный уже скачанный файл (пропускает download)")
     ap.add_argument("--limit", type=int, default=None, help="Ограничить число строк (для теста)")
     ap.add_argument("--skip-schema", action="store_true")
+    ap.add_argument("--force-download", action="store_true",
+                    help="скачать RIPE-файл принудительно, игнорируя кэш/TTL/хеш")
     args = ap.parse_args()
 
     cfg = get_config()
@@ -145,7 +214,9 @@ def main() -> int:
         init_schema()
 
     if not args.file:
-        download(args.url or cfg.ripe_url, dest)
+        fetch(args.url or cfg.ripe_url, dest,
+              force=args.force_download or cfg.ripe_force_download,
+              ttl_hours=cfg.ripe_cache_ttl_hours)
 
     try:
         stats = load_into_db(cfg, dest, args.limit)

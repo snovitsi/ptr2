@@ -81,6 +81,17 @@ cp .env.example .env      # при необходимости поправьте
 > bash-конструкции `case ... ;;`.
 
 `setup_env.sh` можно запустить с `--no-apt`, если системные пакеты уже стоят.
+По умолчанию скрипт **устанавливает всё сам**: отсутствующие системные пакеты
+через apt (redis-server, postgresql, postgresql-client, python3-venv/pip),
+python-зависимости из `requirements.txt` в `.venv`, затем запускает PG/Redis,
+создаёт роль/БД `ptr2` и схему. Если пропустить установку пакетов (`--no-apt`)
+на чистой машине — venv может не создаться (в Debian/Ubuntu модуль `venv`
+поставляется отдельным пакетом `python3-venv`).
+
+Этап 00 (`run_pipeline.sh`) **не скачивает** RIPE-файл каждый раз: копия в
+`./data` переиспользуется, пока ей меньше `RIPE_CACHE_TTL_HOURS` (24 ч) и
+SHA-256 удалённого содержимого совпадает с локальным. Принудительно:
+`./run_pipeline.sh --force-download` или `FORCE_DOWNLOAD=true` в `.env`.
 
 ### Ручная подготовка (альтернатива setup_env.sh)
 

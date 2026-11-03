@@ -58,6 +58,8 @@ for a in "${ORIG_ARGS[@]}"; do
     echo "Флаги пайплайна:"
     echo "  --limit-ranges N    ограничить число диапазонов (быстрый тест)"
     echo "  --ptr-workers K     параллельных PTR-воркеров (по умолчанию PTR_WORKERS или 4)"
+    echo "  --force-download    этап 00: скачать RIPE принудительно (обычно не нужно:"
+    echo "                      файл берётся из ./data, если не менялся — экономия трафика)"
     echo "Переменные окружения:"
     echo "  SKIP=a,b            пропустить этапы (fetch,shard,ptr,load_ptr,check_a,check_web,owa,report)"
     echo "  ONLY=a,b            выполнить только перечисленные этапы"
@@ -99,16 +101,24 @@ parse_opt() { # достаёт значение флага из исходной
     prev="$a"
   done
 }
+
+flag_present() { # есть ли булев флаг в командной строке пайплайна
+  local a
+  for a in "${ORIG_ARGS[@]}"; do [[ "$a" == "$1" ]] && return 0; done
+  return 1
+}
 v=$(parse_opt "--ptr-workers"); [[ -n "$v" ]] && PTR_WORKERS=$v
 v=$(parse_opt "--limit-ranges"); [[ -n "$v" ]] && LIMIT_RANGES=$v
 
-# остальные аргументы прозрачно передаются этапам (кроме флагов пайплайна и их значений)
+# остальные аргументы прозрачно передаются этапам (кроме флагов пайплайна и их значений;
+# --force-download относится только к этапу 00 и дальше не передаётся)
 EXTRA_ARGS=()
 skip_next=0
 for a in "${ORIG_ARGS[@]}"; do
   if [[ $skip_next -eq 1 ]]; then skip_next=0; continue; fi
   case "$a" in
     --ptr-workers|--limit-ranges) skip_next=1 ;;
+    --force-download) ;;
     *) EXTRA_ARGS+=("$a") ;;
   esac
 done
@@ -141,7 +151,9 @@ run_stage() {
 
 if should_run fetch; then
   banner "00. Скачивание RIPE и загрузка диапазонов в PostgreSQL"
-  run_stage fetch "$PY" -m ptr2.scripts.00_fetch_ripe "${EXTRA_ARGS[@]}"
+  FETCH_ARGS=("${EXTRA_ARGS[@]}")
+  flag_present --force-download && FETCH_ARGS+=("--force-download")  # по умолчанию — умный кэш (TTL+SHA-256)
+  run_stage fetch "$PY" -m ptr2.scripts.00_fetch_ripe "${FETCH_ARGS[@]}"
 fi
 
 if should_run shard; then

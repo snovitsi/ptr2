@@ -88,6 +88,13 @@ class Config:
         )
     )
     data_dir: str = field(default_factory=lambda: _env("DATA_DIR", "./data"))
+    # --- кэш RIPE-файла: скачивать только при изменении содержимого ---------
+    ripe_cache_ttl_hours: float = field(
+        default_factory=lambda: _env_float("RIPE_CACHE_TTL_HOURS", 24.0)
+    )
+    ripe_force_download: bool = field(
+        default_factory=lambda: _env_bool("FORCE_DOWNLOAD", False)
+    )
 
     # --- критерии отбора диапазонов ---------------------------------------
     target_countries: tuple[str, ...] = field(
