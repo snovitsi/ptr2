@@ -9,7 +9,7 @@
 | 2 | `ptr2/scripts/02_ptr_worker.py` | Воркер: опрашивает **PTR DNS-записи** всех адресов шардов из очереди (asyncio + dnspython, rate-limit). Результаты — в очередь `ptr_results`. Можно запускать несколько экземпляров параллельно. |
 | 3 | `ptr2/scripts/03_load_ptr.py` | Вычитывает результаты PTR из Redis и пишет их в БД (`ptr_records`), одновременно ставит пары (hostname, ip) в очередь проверки A-записей. |
 | 4 | `ptr2/scripts/04_check_a.py` | Проверяет для каждого найденного хостнейма наличие **прямой A-записи**; помечает `has_a_record` / `points_back` в `a_record_checks` и ставит хосты с A-записью в очередь веб-проверок. |
-| 5 | `ptr2/scripts/05_check_web.py` | Проверяет **доступность веб-сервера** (http/https) по хостам с A-записью: статус, Server-заголовок, `<title>`, финальный URL → `web_checks`; доступные — в очередь OWA. |
+| 5 | `ptr2/scripts/05_check_web.py` | Проверяет **доступность веб-сервера** (http/https) по хостам с A-записью: статус, Server-заголовок, `<title>`, финальный URL → `web_checks`. В таблицу пишутся только URL, по которым сервер ответил; без ответа запись не создаётся. Доступные — в очередь OWA. |
 | 6 | `ptr2/scripts/06_check_owa.py` | Ищет **Outlook Web Access**: пробы `/owa/`, `/owa/auth/logon.aspx`, `/autodiscover/autodiscover.xml`, анализ редиректов, OWA/Exchange-маркеров в заголовках и теле → `owa_checks` (is_owa, confidence, evidence). Плюс **определение версии Exchange**: X-Owa-Version, feOwaVersion в JS, meta msExCcVer, cookie ClientInfo → `exchange_version`, `build_number`, `version_source` (справочник сборок — `ptr2/owa_version.py`). |
 | 7 | `ptr2/scripts/07_report.py` | Сводный отчёт по всем этапам + топ OWA-находок. |
 
@@ -174,7 +174,7 @@ ONLY=report ./run_pipeline.sh                       # только отчёт
 | `shards` | задачи PTR-обхода по 256 адресов + `family_key` (/24) + статус | `(range_id, shard_index)` |
 | `ptr_records` | найденные пары (ip → hostname) | `(ip, hostname)` |
 | `a_record_checks` | проверка прямой A-записи (`has_a_record`, `points_back`, `resolved_ips inet[]`) | `(hostname, expected_ip)` |
-| `web_checks` | доступность http/https, статус, Server, title, final URL | `(url)` |
+| `web_checks` | ответы http/https: статус, Server, title, final URL (без ответа — не пишется) | `(url)` |
 | `owa_checks` | детект OWA: `is_owa`, `confidence`, `evidence`, версия Exchange | `(hostname, url, probe_url)` |
 | `pipeline_runs` | служебная таблица запусков этапов (stats jsonb) | — |
 

@@ -4,7 +4,9 @@
 Берёт задачи из Redis-очереди ptr2:queue:web_checks (создаёт 04_check_a.py)
 или выбирает из БД хостнеймы с has_a_record = TRUE. Для каждого пробует http:// и
 https:// (порт 80/443), фиксирует статус, Server-заголовок, <title>, финальный URL.
-Результат — таблица web_checks; доступные серверы ставятся в очередь OWA-проверок.
+В таблицу web_checks пишутся ТОЛЬКО ответы веб-сервера (получен HTTP-статус);
+без ответа (таймаут, отказ соединения, DNS/TLS-ошибка) запись не создаётся.
+Доступные серверы ставятся в очередь OWA-проверок.
 
 Использование:
     python -m ptr2.scripts.05_check_web [--from-queue] [--from-db --limit N]
@@ -34,6 +36,9 @@ log = logging.getLogger("ptr2.web")
 
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 
+# Пишутся только URL, по которым веб-сервер ответил (http_status IS NOT NULL).
+# Ошибочные строки (reachable=FALSE, http_status=NULL) из прошлых прогонов
+# удаляются, если сервер снова не ответил.
 UPSERT_WEB_SQL = """
 INSERT INTO web_checks (hostname, url, final_url, http_status, server_header, title,
                         reachable, error)
@@ -46,7 +51,14 @@ ON CONFLICT (url) DO UPDATE
        reachable = EXCLUDED.reachable,
        error = EXCLUDED.error,
        checked_at = now()
+WHERE web_checks.http_status IS NOT NULL OR EXCLUDED.http_status IS NOT NULL
 RETURNING id
+"""
+
+DELETE_NOANSWER_SQL = """
+DELETE FROM web_checks
+ WHERE hostname = ANY(%s)
+   AND http_status IS NULL
 """
 
 
@@ -90,9 +102,20 @@ def emit_owa_tasks(cfg, emit, hosts: set[str]) -> None:
     emit([{"hostname": h} for h in sorted(hosts)])
 
 
-async def check_hostnames(cfg, hostnames: list[str], emit_owa) -> tuple[int, int]:
-    """Возвращает (проверено URL, доступно веб-серверов).
+def _answered(res: dict) -> bool:
+    """Веб-сервер ответил (есть HTTP-статус) — такую проверку пишем в БД.
 
+    Без ответа (таймаут/отказ соединения/DNS/TLS) в web_checks ничего не
+    сохраняется; если сервер ранее отвечал, а теперь молчит, старая запись
+    с http_status остаётся нетронутой (не затирается ошибкой).
+    """
+    return res.get("http_status") is not None
+
+
+async def check_hostnames(cfg, hostnames: list[str], emit_owa) -> tuple[int, int]:
+    """Возвращает (записано ответов в web_checks, доступно веб-серверов).
+
+    В БД попадают только URL, по которым сервер ответил; без ответа — не пишем.
     emit_owa(list[dict]) — функция отправки задач OWA-проверки
     (Stream.send_batch или SimpleQueue.push_batch), None = не слать.
     """
@@ -118,21 +141,31 @@ async def check_hostnames(cfg, hostnames: list[str], emit_owa) -> tuple[int, int
 
         results = await asyncio.gather(*(guarded(h, u) for h, u in urls))
 
-    rows = []
+    rows_written = 0
     with db_conn(cfg.dsn()) as conn, conn.cursor() as cur:
+        # в web_checks пишем только ответы веб-сервера (http_status получен);
+        # без ответа запись не создаётся и не обновляется
         for host, res in results:
+            if not _answered(res):
+                continue
             cur.execute(
                 UPSERT_WEB_SQL,
                 (host, res["url"], res["final_url"], res["http_status"], res["server_header"],
                  res["title"], res["reachable"], res["error"]),
             )
+            rows_written += 1
             if res["reachable"]:
                 reachable_hosts.add(host)
+        # чистим «ошибочные» строки (http_status IS NULL) из старых версий кода
+        cur.execute(DELETE_NOANSWER_SQL, (list(set(hostnames)),))
+        deleted = cur.rowcount
+        if deleted:
+            log.info("web: удалено %d записей без ответа от прошлых прогонов", deleted)
         cur.close()
 
     emit_owa_tasks(cfg, emit_owa, reachable_hosts)
 
-    return len(urls), len(reachable_hosts)
+    return rows_written, len(reachable_hosts)
 
 
 async def run(args) -> int:
@@ -170,11 +203,11 @@ async def run(args) -> int:
                 total += n
                 ok += o
             cons.ack(*[mid for mid, _ in msgs])
-            log.info("web: проверено %d URL, доступно хостов %d", total, ok)
+            log.info("web: записано ответов %d, доступно хостов %d", total, ok)
         owa_queued = cons.r.xlen(cfg.stream_owa_checks)
-        stage_done("check_web", urls_checked=total, hosts_reachable=ok,
+        stage_done("check_web", rows_written=total, hosts_reachable=ok,
                    owa_queued=owa_queued, mode="stream")
-        print({"urls_checked": total, "hosts_reachable": ok, "owa_queued": owa_queued})
+        print({"rows_written": total, "hosts_reachable": ok, "owa_queued": owa_queued})
         return 0
 
     if args.from_queue:
@@ -200,10 +233,10 @@ async def run(args) -> int:
             ok += o
             for raw, _ in items:
                 q_in.done(raw)
-            log.info("web: проверено %d URL, доступно хостов %d", total, ok)
-        stage_done("check_web", urls_checked=total, hosts_reachable=ok,
+            log.info("web: записано ответов %d, доступно хостов %d", total, ok)
+        stage_done("check_web", rows_written=total, hosts_reachable=ok,
                    owa_queued=q_out.depth(), mode="queue")
-        print({"urls_checked": total, "hosts_reachable": ok, "owa_queued": q_out.depth()})
+        print({"rows_written": total, "hosts_reachable": ok, "owa_queued": q_out.depth()})
         return 0
 
     # из БД: хостнеймы, у которых подтверждена A-запись
@@ -224,12 +257,12 @@ async def run(args) -> int:
     log.info("К проверке хостнеймов: %d", len(names))
     if names:
         total, ok = await check_hostnames(cfg, names, emit_owa)
-        log.info("Готово: %d URL, %d доступных хостов (%.1f сек)", total, ok, time.time() - t0)
-        stage_done("check_web", urls_checked=total, hosts_reachable=ok,
+        log.info("Готово: записано %d ответов, %d доступных хостов (%.1f сек)", total, ok, time.time() - t0)
+        stage_done("check_web", rows_written=total, hosts_reachable=ok,
                    seconds=round(time.time() - t0, 1))
-        print({"urls_checked": total, "hosts_reachable": ok})
+        print({"rows_written": total, "hosts_reachable": ok})
     else:
-        print({"urls_checked": 0, "hosts_reachable": 0})
+        print({"rows_written": 0, "hosts_reachable": 0})
     return 0
 
 
