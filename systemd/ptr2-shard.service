@@ -1,0 +1,22 @@
+[Unit]
+Description=ptr2: этап 01 — отбор диапазонов по критериям и постановка PTR-шардов в Redis
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target ptr2-fetch.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# Шансы шардов берутся из ripe_ranges; лимит диапазонов — из TARGET_COUNTRIES/.env
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.01_select_and_shard
+TimeoutStartSec=7200
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs
+Restart=no

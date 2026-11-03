@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 00 — ежедневное обновление RIPE-диапазонов
+
+[Timer]
+OnCalendar=${FETCH_ON_CALENDAR}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
+Persistent=true
+Unit=ptr2-fetch.service
+
+[Install]
+WantedBy=timers.target

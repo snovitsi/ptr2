@@ -1,0 +1,23 @@
+[Unit]
+Description=ptr2: этап 05 — проверка доступности веб-серверов http/https (web_checks)
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# --from-queue --once: вычерпать web_checks и завершиться (в БД пишутся только
+# URL, по которым сервер реально ответил)
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.05_check_web --from-queue --once --limit $WEB_LIMIT --batch $WEB_BATCH
+TimeoutStartSec=3600
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs
+Restart=no

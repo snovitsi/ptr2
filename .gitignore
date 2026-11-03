@@ -1,0 +1,29 @@
+# виртуальное окружение
+.venv/
+venv/
+env/
+
+# кэш Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# локальные секреты и окружение (шаблон .env.example отслеживается)
+.env
+.env.local
+
+# загруженные данные RIPE (скачиваются этапом 00, ~8 МБ)
+data/
+
+# логи и временные файлы
+logs/
+*.log
+*.tmp
+*.tar
+*.tar.gz
+*.bundle
+
+# редакторы / ОС
+.vscode/
+.idea/
+.DS_Store

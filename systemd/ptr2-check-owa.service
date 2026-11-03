@@ -1,0 +1,23 @@
+[Unit]
+Description=ptr2: этап 06 — детекция Outlook Web Access и версии Exchange (owa_checks)
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# --from-queue --once: consumer group owa_workers; в таблицу попадают только
+# хосты с определённой версией Exchange
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.06_check_owa --from-queue --once --limit $OWA_LIMIT --batch $OWA_BATCH
+TimeoutStartSec=3600
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs
+Restart=no

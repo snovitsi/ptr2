@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 04 — проверка A-записей каждые 15 минут
+
+[Timer]
+OnCalendar=${CHECK_A_ON_CALENDAR}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
+Persistent=true
+Unit=ptr2-check-a.service
+
+[Install]
+WantedBy=timers.target

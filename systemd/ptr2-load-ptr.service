@@ -1,0 +1,21 @@
+[Unit]
+Description=ptr2: этап 03 — вычитка результатов PTR из Redis в PostgreSQL (ptr_records)
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.03_load_ptr --once --batch $LOAD_BATCH
+TimeoutStartSec=1800
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs
+Restart=no

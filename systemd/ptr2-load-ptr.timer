@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 03 — выгрузка результатов PTR каждые 10 минут
+
+[Timer]
+OnCalendar=${LOAD_PTR_ON_CALENDAR}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
+Persistent=true
+Unit=ptr2-load-ptr.service
+
+[Install]
+WantedBy=timers.target

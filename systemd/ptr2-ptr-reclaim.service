@@ -1,0 +1,21 @@
+[Unit]
+Description=ptr2: возврат неподтверждённых PTR-задач в очередь (XAUTOCLAIM, --once)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# Разово вычитывает stream с reclaim'ом зависших сообщений и завершается;
+# запускается только таймером ptr2-ptr-reclaim.timer
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.02_ptr_worker --reclaim-min-idle 120000 --once
+TimeoutStartSec=300
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs

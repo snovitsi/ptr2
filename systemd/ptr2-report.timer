@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 07 — ежедневный сводный отчёт
+
+[Timer]
+OnCalendar=${REPORT_ON_CALENDAR}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
+Persistent=true
+Unit=ptr2-report.service
+
+[Install]
+WantedBy=timers.target

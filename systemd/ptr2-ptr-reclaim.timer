@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 02 — перехват «зависших» задач из PEL каждые ${RECLAIM_INTERVAL_MIN} мин
+Documentation=https://github.com/snovitsi/ptr2
+
+[Timer]
+OnUnitActiveSec=${RECLAIM_INTERVAL_MIN}min
+OnBootSec=5min
+Unit=ptr2-ptr-reclaim.service
+
+[Install]
+WantedBy=timers.target

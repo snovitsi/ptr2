@@ -1,0 +1,24 @@
+[Unit]
+Description=ptr2: этап 00 — скачивание RIPE delegated-stats и загрузка диапазонов в PostgreSQL
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# .env проекта (DATABASE_URL, REDIS_URL и т.д.) читает сам ptr2/config.py;
+# FORCE_DOWNLOAD подставлен из /etc/ptr2/ptr2.env при установке скриптом
+# install_services.sh (пусто = использовать кэш по хешу/TTL).
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.00_fetch_ripe --skip-schema $FORCE_DOWNLOAD
+TimeoutStartSec=3600
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/data /opt/ptr2/logs
+Restart=no

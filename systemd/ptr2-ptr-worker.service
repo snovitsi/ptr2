@@ -1,0 +1,23 @@
+[Unit]
+Description=ptr2: этап 02 — PTR-воркер (долгоживущий, читает шарды из Redis)
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# Параллельные воркеры на этой машине: ptr2-ptr-worker@1..$PTR_WORKERS
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.02_ptr_worker --reclaim-min-idle 120000
+TimeoutStopSec=60
+Restart=always
+RestartSec=15
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs

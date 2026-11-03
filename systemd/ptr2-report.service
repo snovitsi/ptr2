@@ -1,0 +1,24 @@
+[Unit]
+Description=ptr2: этап 07 — сводный отчёт по результатам пайплайна
+Documentation=https://github.com/snovitsi/ptr2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ptr2
+Group=ptr2
+WorkingDirectory=/opt/ptr2
+EnvironmentFile=-/etc/ptr2/ptr2.env
+# Отчёт печатается в journal (journalctl -u ptr2-report.service);
+# REPORT_FORMAT=csv — вывод CSV. Для выгрузки в файл:
+#   ExecStart=/bin/sh -c '... 07_report.py --format csv > /opt/ptr2/logs/report.csv'
+ExecStart=/opt/ptr2/.venv/bin/python -m ptr2.scripts.07_report --format $REPORT_FORMAT
+TimeoutStartSec=600
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ptr2/logs
+Restart=no

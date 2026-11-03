@@ -1,0 +1,11 @@
+[Unit]
+Description=ptr2: таймер этапа 05 — проверка веб-серверов каждые 30 минут
+
+[Timer]
+OnCalendar=${CHECK_WEB_ON_CALENDAR}
+RandomizedDelaySec=${RANDOMIZED_DELAY_SEC}
+Persistent=true
+Unit=ptr2-check-web.service
+
+[Install]
+WantedBy=timers.target
